@@ -265,3 +265,39 @@ def test_only_the_missing_files_are_added(tmp_path, reference):
 
     assert added == [packing.PIPELINE, packing.MLA_CONFIG]
     assert contents(pack)[packing.PREPROC] == b"mine, not the reference's"
+
+
+def test_the_inventory_names_what_the_error_message_asks_about(tmp_path, reference):
+    """The runtime says what it wanted and never what it found."""
+    lines = packing.describe(reference)
+    text = chr(10).join(lines)
+    assert "MLA_0=MLA" in text
+    assert "outputs: 6" in text
+    assert "pipeline MLA_0: CVU/preproc -> MLA/mla" in text
+    assert packing.PIPELINE in text
+
+
+def test_the_inventory_says_when_the_pipeline_is_absent(tmp_path):
+    text = chr(10).join(packing.describe(compiled(tmp_path)))
+    assert f"{packing.PIPELINE}: absent" in text
+    assert "MLA_0=MLA" in text
+
+
+def test_the_inventory_survives_a_pack_it_cannot_read(tmp_path):
+    broken = tmp_path / "broken.tar.gz"
+    broken.write_bytes(b"not an archive")
+    assert "could not be read" in chr(10).join(packing.describe(broken))
+
+
+def test_the_inventory_survives_an_archive_with_no_manifest(tmp_path):
+    empty = build(tmp_path / "empty.tar.gz", {"readme.txt": b"hi"})
+    assert "not a model pack" in chr(10).join(packing.describe(empty))
+
+
+def test_a_refusal_carries_the_inventory_with_it(tmp_path):
+    """One run has to answer both halves: what was wanted, and what is there."""
+    pack = compiled(tmp_path)
+    message = packing.load_failure(pack, RuntimeError("missing an MLA stage"))
+    assert "missing an MLA stage" in message
+    assert pack.name in message
+    assert f"{packing.PIPELINE}: absent" in message

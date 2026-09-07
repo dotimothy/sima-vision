@@ -227,3 +227,54 @@ def add_to_pack(pack: Path, files: dict[str, bytes]) -> None:
             info.mode = 0o644
             new.addfile(info, io.BytesIO(body))
     temp.replace(pack)
+
+
+def describe(pack: Path) -> list[str]:
+    """What a pack holds, in the terms the runtime's own errors use.
+
+    A pack that will not load is opaque from the outside: the message names
+    what was wanted and never what was found. This is the other half, printed
+    beside the failure, so one run says which of the two is missing rather than
+    a round trip saying it again.
+    """
+    lines: list[str] = []
+    try:
+        with tarfile.open(pack) as tar:
+            names = sorted(tar.getnames())
+            lines.append(f"files: {', '.join(names)}")
+            try:
+                manifest = read_manifest(tar)
+            except RuntimeError as exc:
+                lines.append(f"manifest: {exc}")
+                return lines
+            plugins = manifest.get("plugins", [])
+            lines.append(f"model sdk: {manifest.get('model_sdk_version')}")
+            lines.append(
+                "plugins: "
+                + (", ".join(
+                    f"{p.get('name')}={p.get('processor')}" for p in plugins
+                ) or "none")
+            )
+            lines.append(f"outputs: {output_count(manifest)}")
+            if PIPELINE in names:
+                sequence = json.loads(tar.extractfile(PIPELINE).read())
+                for pipeline in sequence.get("pipelines", []):
+                    stages = " -> ".join(
+                        f"{s.get('processor')}/{s.get('kernel')}"
+                        for s in pipeline.get("sequence", [])
+                    )
+                    lines.append(f"pipeline {pipeline.get('name')}: {stages}")
+            else:
+                lines.append(f"{PIPELINE}: absent")
+    except (OSError, tarfile.TarError, ValueError) as exc:
+        lines.append(f"could not be read: {exc}")
+    return lines
+
+
+def load_failure(pack: Path, exc: Exception) -> str:
+    """The runtime's refusal, with the pack's own inventory under it."""
+    return (
+        f"the runtime would not load {pack.name}: {exc}"
+        + chr(10) + "  "
+        + (chr(10) + "  ").join(describe(pack))
+    )

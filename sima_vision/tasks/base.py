@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import tarfile
 from dataclasses import replace
 from pathlib import Path
 
 from .. import segments
-from ..assets import ensure_assets
+from ..assets import default_model_path, ensure_assets, ensure_model, models_dir
 from ..config import (
     BaseConfig,
     TaskDefaults,
@@ -34,6 +35,7 @@ from ..neat import (
     make_run_options,
     resolve_flow_control,
 )
+from ..pack import complete_pack, load_failure, missing_files
 from ..runloop import Stopper, TaskRuntime, run_pipeline, sink_depth_for
 from ..runtime import FAMILY_DECODE_TOKENS
 from ..sinks import Pipeline, load_labels, open_video_writer, start_insight
@@ -194,10 +196,51 @@ class Task:
         step.done(f"{width}x{height} @ {fps} fps")
         return width, height, fps
 
+    def repair_pack(self, cfg, step) -> None:
+        """Add the files the board reads first, when a pack does not have them.
+
+        A pack compiled by the Model SDK alone carries the ELF and the manifest
+        and not the pipeline the preprocess planner looks for. That is fixed
+        where it is compiled, but a pack built before that fix, or on a machine
+        without a published pack to copy from, arrives here still missing them.
+        Cheaper to finish it here than to send someone back through a
+        thirty-minute compile.
+        """
+        pack = Path(cfg.model_path)
+        if not pack.is_file():
+            return
+        try:
+            missing = missing_files(pack)
+        except (OSError, tarfile.TarError):
+            return                      # not an archive; the loader will say so
+        if not missing:
+            return
+
+        step.note(f"this pack has no {', '.join(missing)}, which the board reads")
+        others = [p for p in sorted(models_dir().glob("*.tar.gz")) if p != pack]
+        if not others:
+            step.detail("fetching a published pack to copy them from")
+            try:
+                ensure_model(default_model_path(self.name), self.name, step)
+            except RuntimeError as exc:
+                step.note(str(exc))
+                return
+            others = [p for p in sorted(models_dir().glob("*.tar.gz")) if p != pack]
+        if not others:
+            return
+        added = complete_pack(pack, others[0])
+        step.detail(f"added {', '.join(added)} from {others[0].name}")
+
     def load_model(self, cfg, width: int, height: int, step) -> Pipeline:
         """Step: unpack the archive onto the MLA and build the empty Pipeline."""
+        self.repair_pack(cfg, step)
         step.note("the first load unpacks the archive, which can take a minute")
-        model = make_model(cfg, width, height)
+        try:
+            model = make_model(cfg, width, height)
+        except Exception as exc:
+            # Whatever the runtime says, it says it about a pack it will not
+            # describe. The inventory goes in the same message.
+            raise RuntimeError(load_failure(Path(cfg.model_path), exc)) from exc
         labels = load_labels(cfg.labels_path)
         # Published before the graph exists so run()'s finally can close a
         # pipeline that failed part-way through building.
